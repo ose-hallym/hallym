@@ -1,0 +1,25 @@
+{
+  "candidate_sha256": "cab82b1a8ca2a491236c832e68962cc0231c6f0946de9b3a41a96f52958b932f",
+  "candidate3_sha256": "de14ec8e4f4178892b687e96dcf6266503657653e9cd4c20295d7c83f2933bac",
+  "sources": {
+    "assemble_red.py": "0469b48cf1e7e4a10e4dc43e388aa286de9ea652fbd840f0f9c20c7b12306ce8",
+    "assemble_runtime.py": "64c6f1d3cdf5ed9f20f3d923cac1cddb79ad5db015feb7bd1e9f3dca34b9c9b5",
+    "cap_policy.py": "f2746fdc3d011f84f7fb733f9f2c0ee3c4e41dbe827ba275e62a81b5505bdf0d",
+    "freeze_and_accept.py": "ce8cdc88f6a0861c3f10875212c8e8bd267f6e4eb346893ecb8f008ae8be08a9",
+    "isolated_integration.py": "cab82b1a8ca2a491236c832e68962cc0231c6f0946de9b3a41a96f52958b932f",
+    "prepare.py": "e43e07398e7fdb0c5a05d6841f07c50d185d2b013d44b4a07ddf1e430f8ea2eb",
+    "red_fixture.py": "723be5f59ff7160fac21de34a9c9b0194e312f17c640500144dc55cc71ec6880",
+    "run_offline.py": "43cbeecde69603032edd6d4ddb2a39b32bfec55de63f752b78c9b7a3f74f6a03",
+    "runtime_fixture.py": "0b222c1b949a632a49d4b416284bbefeb50782ed4f001af73c883488f9d6e93e",
+    "suite_v3.py": "1bef90b502afdbb0a6236bf763ae980355cefee695dc4a47670683f27ca533be",
+    "test_gate_negatives.py": "1a22ffa81d42240b755c99eec44be8862d389111c5ea1a5edd986e8684642833",
+    "test_lifecycle_paths.py": "ebf9a44aed0df0f31be3961825c9fa5b0fdd9a3ea5154e9716d37fcbfa95ded2",
+    "test_runtime_cases.py": "4948dacf3a0731e35dab4e614957ef433e1f3e67494ac11399dc9452ff98229d",
+    "trusted_bootstrap.py": "3e8ab958f52619f3e5575cbacd26d52423d357967948a7ab22aae51feb42010d",
+    "trusted_inputs.py": "b98a93e1ea2bdb7839ebc952286791413d6cf7253a6326084dca4cb2aea486ad"
+  },
+  "scope": "candidate4: user-directed revision of sealed candidate3 (2026-11-05)",
+  "accepted": false,
+  "hermes_suite_executed": false,
+  "selfcheck": "11/11 PASS on httpx 0.28.1 with stub bootstrap (not Hermes)"
+}
