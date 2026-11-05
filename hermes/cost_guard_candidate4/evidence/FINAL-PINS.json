@@ -1,0 +1,23 @@
+{
+  "candidate_sha256": "de14ec8e4f4178892b687e96dcf6266503657653e9cd4c20295d7c83f2933bac",
+  "sources": {
+    "assemble_red.py": "0469b48cf1e7e4a10e4dc43e388aa286de9ea652fbd840f0f9c20c7b12306ce8",
+    "assemble_runtime.py": "64c6f1d3cdf5ed9f20f3d923cac1cddb79ad5db015feb7bd1e9f3dca34b9c9b5",
+    "freeze_and_accept.py": "ce8cdc88f6a0861c3f10875212c8e8bd267f6e4eb346893ecb8f008ae8be08a9",
+    "isolated_integration.py": "de14ec8e4f4178892b687e96dcf6266503657653e9cd4c20295d7c83f2933bac",
+    "prepare.py": "e43e07398e7fdb0c5a05d6841f07c50d185d2b013d44b4a07ddf1e430f8ea2eb",
+    "red_fixture.py": "723be5f59ff7160fac21de34a9c9b0194e312f17c640500144dc55cc71ec6880",
+    "runtime_fixture.py": "0b222c1b949a632a49d4b416284bbefeb50782ed4f001af73c883488f9d6e93e",
+    "run_offline.py": "20d97bd49a1661b522cc76b8a162ccb72b3f453db10205bf86d086bbbb1d3a1f",
+    "suite_v3.py": "4ee10f79f2a839d4e19665f0eda9cb37285c6004e61049ea563d3b18e845a993",
+    "test_gate_negatives.py": "731583251feb5229ecc1e52b35c0ed7ff4483b4c77b39b0036b97d1575e547b3",
+    "test_lifecycle_paths.py": "980e9b444316ccc194ae61b575d0f60092ebafcc3b0527af74a0207e448dce3f",
+    "test_runtime_cases.py": "7782bd79ecf84f51356b07c9e252772a6f4e823bd4e5bbec6114417a821bc918",
+    "trusted_bootstrap.py": "4e3d6992ebe1271756a0deee054f43f8453c207b7b481d2303c1314ecc657397",
+    "trusted_inputs.py": "f61644b37336d28900f62a923fe84943d377c355eb8fb2056bc5dfb369a7d14c"
+  },
+  "allocations_sha256": "d13493af4b824662f83386b29a111dcf600ff4b27bf9ebd92e60f23db66b25aa",
+  "original_sources_sha256": "9ade6202f6a65f6ba3749cd7ece820db8ccb495c257081645caee513876da903",
+  "scope": "one additional candidate3/max3/no automatic fourth",
+  "accepted": false
+}

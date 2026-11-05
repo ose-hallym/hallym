@@ -1,0 +1,60 @@
+{
+  "status": "SKYNET_FINAL_SCOPED_SECURITY_LOGIC_PASS_INTEGRATION_INCOMPLETE",
+  "candidate_accepted": false,
+  "security": "PASS_SCOPED_SYNTHETIC",
+  "logic": "PASS_SCOPED_SYNTHETIC",
+  "integration": "INCOMPLETE",
+  "review_manifest_sha256": "1c68f984b16402a75aa1fce76130df8df78f5c9dce471d18d9134c77388bf86d",
+  "review_sha256": "55fff16ca4dcd631800de92c36dbb28a3c2316da044ed3bcb94bee0f1f2602e1",
+  "review_members": 759,
+  "protected_unchanged": 5079,
+  "candidate_sha256": "de14ec8e4f4178892b687e96dcf6266503657653e9cd4c20295d7c83f2933bac",
+  "same_final_sha": true,
+  "raw_counts": {
+    "full_final": {
+      "methods": 28,
+      "failures": 0,
+      "errors": 0
+    },
+    "cold_spent": {
+      "methods": 1,
+      "failures": 0,
+      "errors": 0
+    },
+    "processraceA": {
+      "methods": 1,
+      "failures": 0,
+      "errors": 0
+    },
+    "processraceB": {
+      "methods": 1,
+      "failures": 0,
+      "errors": 0
+    },
+    "method_executions": 31,
+    "unique_methods": 30,
+    "raw_successful_subtest_count": null,
+    "static_expanded_subtest_context_count": 105,
+    "subtest_count_note": "unittest success logs do not enumerate subtests; the following is a deterministic expansion from unchanged successful methods, NOT separately instrumented raw results",
+    "supplementary_diagnostic_cases": 2,
+    "supplementary_unit_tests": 0,
+    "fake_sends_total": 10,
+    "real_sends": 0
+  },
+  "required_remaining": [
+    "automatic credential refresh/rotation and fallback chain",
+    "full automatic title/compression lifecycle",
+    "12 supplementary original imports lack pre-review pin provenance",
+    "authoritative paid project/token/vendor semantics/KRW FX proof"
+  ],
+  "actual_model": 0,
+  "actual_bot": "NOT_RUN",
+  "spend": 0,
+  "KRW1000_unconsumed": true,
+  "live_entry_enabled": false,
+  "deployment": false,
+  "candidates_consumed": 3,
+  "candidates_max": 3,
+  "automatic_fourth": false,
+  "next": "Send clearly labelled non-production source-review ZIP and final report to approved personal Gmail, then cross-bot verification subject to existing cost gates."
+}

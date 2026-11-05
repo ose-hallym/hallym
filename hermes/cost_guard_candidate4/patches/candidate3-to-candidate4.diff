@@ -1,0 +1,457 @@
+diff --git a/candidate4/cap_policy.py b/candidate4/cap_policy.py
+new file mode 100644
+index 0000000..93ef8e3
+--- /dev/null
++++ b/candidate4/cap_policy.py
+@@ -0,0 +1,35 @@
++"""Approved cap transformation shared by trusted issuance (trusted_bootstrap) and enforcement (isolated_integration).
++
++Both sides must apply exactly this function: the frozen final wire is derived from it before arm, and the
++enforcement recomputes it on the actual outgoing request. `reject` must raise; it never returns.
++Candidate3 only overwrote maxOutputTokens/candidateCount and left thinkingConfig untouched (review finding H3)
++and raised a lower builder value up to 4096 instead of capping it (finding M3).
++"""
++MAX_OUTPUT_TOKENS = 4096
++CANDIDATE_COUNT = 1
++THINKING_BUDGET_UPPER = 4096
++THINKING_KEYS = frozenset(('includeThoughts', 'thinkingBudget', 'thinkingLevel'))
++
++
++def apply_cap(obj, reject):
++    cfg = obj['generationConfig']
++    if type(cfg.get('maxOutputTokens')) is not int:
++        reject('cap exact integer')
++    cfg['maxOutputTokens'] = min(cfg['maxOutputTokens'], MAX_OUTPUT_TOKENS)
++    cfg['candidateCount'] = CANDIDATE_COUNT
++    tc = cfg.get('thinkingConfig')
++    if tc is None:
++        return obj
++    if type(tc) is not dict or not set(tc) <= THINKING_KEYS:
++        reject('thinkingConfig unapproved shape')
++    if 'includeThoughts' in tc and type(tc['includeThoughts']) is not bool:
++        reject('includeThoughts exact boolean')
++    if 'thinkingLevel' in tc and (type(tc['thinkingLevel']) is not str or not 0 < len(tc['thinkingLevel']) <= 16):
++        reject('thinkingLevel exact string')
++    if 'thinkingBudget' in tc:
++        if type(tc['thinkingBudget']) is not int:
++            reject('thinkingBudget exact integer')
++        # Gemini treats a negative budget as dynamic (unbounded); bound it like any oversized value.
++        if tc['thinkingBudget'] < 0 or tc['thinkingBudget'] > THINKING_BUDGET_UPPER:
++            tc['thinkingBudget'] = THINKING_BUDGET_UPPER
++    return obj
+diff --git a/candidate3/isolated_integration.py b/candidate4/isolated_integration.py
+index 3cd28a5..e555c13 100644
+--- a/candidate3/isolated_integration.py
++++ b/candidate4/isolated_integration.py
+@@ -1,10 +1,15 @@
+ """Single offline integration candidate. NO LIVE TRANSPORT OR LAUNCH ENTRY.
+ The only accepted authorities are a finite, hash-pinned synthetic fixture catalog.
+ Existing bot credentials, project proof and the real cost authorization are never accepted.
++
++Candidate4 (user-directed revision of candidate3, 2026-11-05): shared cap policy with thinkingBudget clamp,
++namespace cumulative KRW ledger, exact built-in transport only (no `_inner` wrapper), global install marker,
++positional transport arguments refused, and a wait-for-complete ledger row reader for cross-process tests.
+ """
+ import os
+ import sys
+ import json
++import time
+ import hashlib
+ import threading
+ import stat
+@@ -14,9 +19,13 @@ from pathlib import Path
+ import httpx
+ 
+ import trusted_bootstrap
++from cap_policy import apply_cap, MAX_OUTPUT_TOKENS, CANDIDATE_COUNT
+ _CONTEXT = trusted_bootstrap.current()
+ LEDGER = Path(_CONTEXT['ledger'])
+ PROFILE_HOME = Path(_CONTEXT['profile_home'])
++if type(_CONTEXT.get('namespace_max_krw')) is not int or _CONTEXT['namespace_max_krw'] <= 0:
++    raise RuntimeError('trusted context lacks a positive integer namespace_max_krw')
++NAMESPACE_MAX_KRW = _CONTEXT['namespace_max_krw']
+ KEY = 'SYNTHETIC-ONLY-2108ae-NOT-A-REAL-KEY'
+ URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent'
+ LOCK = threading.RLock()
+@@ -71,6 +80,43 @@ def wire(request):
+ def digest(request):
+     return hashlib.sha256(canonical(wire(request))).hexdigest()
+ 
++def cumulative_krw(unreadable_row_krw):
++    """Sum synthetic_krw over every reservation row of this namespace ledger.
++
++    Unreadable or partially written rows count at the per-authority maximum (fail closed). Cross-process
++    admission is serialized only by the exclusive row create, so two processes may each pass this check
++    once; the overshoot is bounded by one row per concurrently admitted process and never refunded.
++    """
++    total = Decimal(0)
++    if not LEDGER.is_dir():
++        return total
++    for p in LEDGER.iterdir():
++        if not (p.is_file() and p.suffix == '.json' and len(p.stem) == 64):
++            continue
++        try:
++            total += Decimal(str(json.loads(p.read_bytes())['synthetic_krw']))
++        except Exception:
++            total += Decimal(unreadable_row_krw)
++    return total
++
++def read_ledger_row(path, wait=2.0):
++    """Read a reservation row that another process may still be writing.
++
++    The exclusive create precedes the write, so a 0-byte file is a legitimate transient state rather than
++    corruption; wait briefly for complete JSON. The gate itself never depends on row content.
++    """
++    deadline = time.monotonic() + wait
++    while True:
++        raw = path.read_bytes()
++        if raw:
++            try:
++                return loads(raw)
++            except ValueError:
++                pass
++        if time.monotonic() >= deadline:
++            raise RuntimeError('ledger row incomplete after wait: ' + str(path))
++        time.sleep(0.01)
++
+ class Gate:
+     def __setattr__(self, name, value):
+         if getattr(self, '_sealed', False):
+@@ -92,7 +138,7 @@ class Gate:
+             reject('proof does not equal frozen validated synthetic authority')
+         if not date.fromisoformat(proof['valid_from']) <= date.today() <= date.fromisoformat(proof['valid_through']):
+             reject('stale proof')
+-        if (proof['input_upper'], proof['output_plus_thinking_upper'], proof['candidates'], proof['max_requests']) != (16384,4096,1,1):
++        if (proof['input_upper'], proof['output_plus_thinking_upper'], proof['candidates'], proof['max_requests']) != (16384, MAX_OUTPUT_TOKENS, CANDIDATE_COUNT, 1):
+             reject('immutable policy limits')
+         usd = (Decimal(proof['input_upper']) * Decimal(proof['input_usd_million']) +
+                Decimal(proof['output_plus_thinking_upper']) * Decimal(proof['output_usd_million'])) / Decimal(1000000)
+@@ -103,6 +149,7 @@ class Gate:
+         self._authority = frozen['authorization_id']
+         self._record = canonical(frozen)
+         self.conditional_usd, self.synthetic_krw = str(usd), str(krw)
++        self._max_krw = proof['max_krw']
+         # No path argument, environment override or fresh filename can replenish this ID.
+         self._path = LEDGER / (hashlib.sha256(self._authority.encode()).hexdigest() + '.json')
+         self._sealed = True
+@@ -142,10 +189,9 @@ class Gate:
+         cfg = obj['generationConfig']
+         if type(cfg.get('maxOutputTokens')) is not int:
+             reject('cap exact integer')
+-        EVENTS.append({'decision': 'ORIGINAL_BUILDER_OBSERVED', 'maxOutputTokens': cfg['maxOutputTokens'], 'raw_wire_sha256': digest(request), 'actual_raw_wire': wire(request)})
+-        # After the actual Gemini builder; its approved 65535 headroom is not allowed on wire.
+-        cfg['maxOutputTokens'] = 4096
+-        cfg['candidateCount'] = 1
++        EVENTS.append({'decision': 'ORIGINAL_BUILDER_OBSERVED', 'maxOutputTokens': cfg['maxOutputTokens'], 'thinkingConfig': cfg.get('thinkingConfig'), 'raw_wire_sha256': digest(request), 'actual_raw_wire': wire(request)})
++        # After the actual Gemini builder; the shared approved cap transformation is the only mutation.
++        apply_cap(obj, reject)
+         body = json.dumps(obj, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
+         request._content = body
+         request.stream = httpx.ByteStream(body)
+@@ -162,6 +208,8 @@ class Gate:
+             shape(LEDGER)
+             LEDGER.mkdir(parents=True, exist_ok=True)
+             shape(self._path)
++            if cumulative_krw(self._max_krw) + Decimal(self.synthetic_krw) > Decimal(NAMESPACE_MAX_KRW):
++                reject('namespace cumulative budget exceeded')
+             row = {'authorization_id': self._authority, 'state': 'RESERVED_CONSUMPTION_UNKNOWN',
+                    'wire_sha256': digest(request), 'synthetic_only': True,
+                    'conditional_usd': self.conditional_usd, 'synthetic_krw': self.synthetic_krw,
+@@ -186,7 +234,8 @@ def arm(name, proof, agent):
+ 
+ def install(fake_handler):
+     global INSTALLED
+-    if INSTALLED:
++    # The module flag alone is per-module: a byte-identical relocated copy has its own. Mark the httpx objects.
++    if INSTALLED or getattr(httpx.HTTPTransport.handle_request, '_cost_guard_installed', False) or getattr(httpx.Client.send, '_cost_guard_installed', False):
+         reject('global transport already installed')
+     INSTALLED = True
+     original_client_init = httpx.Client.__init__
+@@ -232,6 +281,8 @@ def install(fake_handler):
+         kwargs.update(follow_redirects=False, trust_env=False)
+         original_client_init(self, *args, **kwargs)
+     def transport_init(self, *args, **kwargs):
++        if args:
++            reject('positional transport arguments')
+         if type(kwargs.get('retries', 0)) is not int or kwargs.get('retries', 0) != 0 or kwargs.get('proxy') is not None:
+             reject('transport retry or proxy requested')
+         kwargs.update(retries=0, trust_env=False)
+@@ -244,13 +295,15 @@ def install(fake_handler):
+             reject('event hooks forbidden before invocation')
+         if self.follow_redirects is not False or self._trust_env is not False or kwargs.get('follow_redirects') is True or kwargs.get('stream', False) is not False:
+             reject('underlying client redirect proxy streaming invariant')
+-        # Only the built-in transport (or Hermes shared view of it) may dispatch.
++        # Only the exact built-in transport whose class-level handle_request is this gate may dispatch.
++        # Candidate3 admitted any wrapper exposing `_inner`; httpx calls the wrapper's own handle_request,
++        # so a non-delegating wrapper bypassed prepare/reserve entirely.
+         for transport in [self._transport, *(self._mounts or {}).values()]:
+             if transport is None:
+                 continue
+-            inner = getattr(transport, '_inner', transport)
+-            if type(inner) is not httpx.HTTPTransport or inner._pool._retries != 0:
+-                reject('custom transport or retry pool')
++            if (type(transport) is not httpx.HTTPTransport or 'handle_request' in vars(transport)
++                    or type(transport).handle_request is not handle or transport._pool._retries != 0):
++                reject('custom transport, wrapper or retry pool')
+         return original_send(self, request, **kwargs)
+     def handle(transport, request):
+         if transport._pool._retries != 0:
+@@ -270,6 +323,8 @@ def install(fake_handler):
+     httpx.Client._build_request_auth = request_auth
+     httpx.Client.build_request = build_request
+     httpx.HTTPTransport.__init__ = transport_init
++    handle._cost_guard_installed = True
++    send._cost_guard_installed = True
+     httpx.Client.send = send
+     httpx.HTTPTransport.handle_request = handle
+     httpx.AsyncClient.send = async_send
+diff --git a/candidate3/run_offline.py b/candidate4/run_offline.py
+index 12ed4cb..2aeeb0a 100644
+--- a/candidate3/run_offline.py
++++ b/candidate4/run_offline.py
+@@ -29,10 +29,10 @@ snap=root/(label+'-snapshot');snap.mkdir()
+ for p in C.glob('*.py'):(snap/p.name).write_bytes(p.read_bytes())
+ start=time.monotonic()
+ try:
+- p=subprocess.run(cmd,cwd='C:/Users/HERMEZ',env=env,capture_output=True,timeout=240)
++ p=subprocess.run(cmd,cwd=str(home),env=env,capture_output=True,timeout=240)
+  out,err,code=p.stdout,p.stderr,p.returncode
+ except subprocess.TimeoutExpired as e:out,err,code=e.stdout or b'',e.stderr or b'',124
+ (root/(label+'.out')).write_bytes(out);(root/(label+'.err')).write_bytes(err)
+-record={'argv':cmd,'cwd':'C:/Users/HERMEZ','environment':env,'exit_code':code,'elapsed':time.monotonic()-start,'stdout_sha256':hashlib.sha256(out).hexdigest(),'stderr_sha256':hashlib.sha256(err).hexdigest(),'source_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in C.glob('*.py')}}
++record={'argv':cmd,'cwd':str(home),'environment':env,'exit_code':code,'elapsed':time.monotonic()-start,'stdout_sha256':hashlib.sha256(out).hexdigest(),'stderr_sha256':hashlib.sha256(err).hexdigest(),'source_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in C.glob('*.py')}}
+ receipt.write_text(json.dumps(record,indent=2));print(json.dumps({'receipt':str(receipt),'exit':code,'stdout_bytes':len(out),'stderr_bytes':len(err)}))
+ raise SystemExit(code)
+diff --git a/candidate3/suite_v3.py b/candidate4/suite_v3.py
+index d936468..2dd180d 100644
+--- a/candidate3/suite_v3.py
++++ b/candidate4/suite_v3.py
+@@ -1,4 +1,4 @@
+-"""Complete candidate2 acceptance replay; failures and setup errors remain raw."""
++"""Complete candidate4 acceptance replay; failures and setup errors remain raw."""
+ import os,sys,io,json,unittest,hashlib,importlib.util
+ from pathlib import Path
+ import httpx
+@@ -19,7 +19,7 @@ def run(agent,g,fake,label):
+     gate=g.arm('processrace',g.catalog('processrace')['proof'],agent)
+     response=turn()
+     self.assertLessEqual(len(fake.CAPTURES),1)
+-    row=json.loads(gate._path.read_bytes())
++    row=g.read_ledger_row(gate._path)
+     self.assertEqual(row['state'],'RESERVED_CONSUMPTION_UNKNOWN')
+     (W/(label+'-race.json')).write_text(json.dumps({'captures':fake.CAPTURES,'ledger_sha256':hashlib.sha256(gate._path.read_bytes()).hexdigest(),'response':response},default=str))
+   run_class(ProcessRace)
+@@ -139,6 +139,43 @@ def run(agent,g,fake,label):
+     reasons=[e.get('reason') for e in records[1]['guard_events']]
+     for expected in ('raw final-built wire differs from frozen packet','unapproved method host path model key','credential environment refresh mismatch'):
+      self.assertIn(expected,reasons)
++   def test_relocated_copy_cannot_install_second_transport(self):
++    raw=(C/'isolated_integration.py').read_bytes();p=W/'relocated_install_engine.py';p.write_bytes(raw)
++    spec=importlib.util.spec_from_file_location('relocated_install_engine',p);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
++    before=httpx.HTTPTransport.handle_request
++    with self.assertRaisesRegex(m.Refused,'already installed'):m.install(lambda t,r:None)
++    self.assertIs(httpx.HTTPTransport.handle_request,before)
++   def test_wrapper_transport_and_positional_transport_args_refused(self):
++    seen=[]
++    class Wrapper(httpx.BaseTransport):
++     def __init__(self,inner):self._inner=inner
++     def handle_request(self,request):seen.append('wrapper dispatched');return httpx.Response(200,request=request)
++    client=httpx.Client(transport=Wrapper(httpx.HTTPTransport()))
++    try:
++     with self.assertRaisesRegex(g.Refused,'custom transport'):client.post(g.URL,json={})
++    finally:client.close()
++    client=httpx.Client();client._transport.handle_request=lambda request:seen.append('instance override')
++    try:
++     with self.assertRaisesRegex(g.Refused,'custom transport'):client.post(g.URL,json={})
++    finally:client.close()
++    with self.assertRaisesRegex(g.Refused,'positional transport'):httpx.HTTPTransport(True)
++    self.assertEqual(seen,[]);self.assertEqual(fake.CAPTURES,[])
++   def test_namespace_cumulative_budget_refuses_before_reservation(self):
++    gate=g.arm('title',g.catalog('title')['proof'],agent);old=g.NAMESPACE_MAX_KRW;g.NAMESPACE_MAX_KRW=0
++    try:turn()
++    finally:g.NAMESPACE_MAX_KRW=old
++    self.assertEqual(fake.CAPTURES,[]);self.assertEqual(g.EVENTS[-1]['reason'],'namespace cumulative budget exceeded');self.assertFalse(gate._path.exists())
++    self.assertGreater(g.cumulative_krw(56),0)
++   def test_cap_policy_min_and_thinking_budget_clamp(self):
++    import cap_policy
++    def raiser(reason):raise AssertionError(reason)
++    obj={'generationConfig':{'maxOutputTokens':1024,'thinkingConfig':{'thinkingBudget':24576,'includeThoughts':False,'thinkingLevel':'high'}}}
++    cap_policy.apply_cap(obj,raiser);cfg=obj['generationConfig']
++    self.assertEqual((cfg['maxOutputTokens'],cfg['candidateCount'],cfg['thinkingConfig']['thinkingBudget']),(1024,1,cap_policy.THINKING_BUDGET_UPPER))
++    obj={'generationConfig':{'maxOutputTokens':65535,'thinkingConfig':{'thinkingBudget':-1}}}
++    cap_policy.apply_cap(obj,raiser);self.assertEqual((obj['generationConfig']['maxOutputTokens'],obj['generationConfig']['thinkingConfig']['thinkingBudget']),(4096,cap_policy.THINKING_BUDGET_UPPER))
++    for bad in ({'thinkingBudget':'1'},{'unknownKey':1},{'includeThoughts':1},{'thinkingLevel':''}):
++     with self.subTest(bad=bad),self.assertRaises(AssertionError):cap_policy.apply_cap({'generationConfig':{'maxOutputTokens':1,'thinkingConfig':bad}},raiser)
+   run_class(Contracts)
+  summary={'tests':sum(r['tests'] for r in records),'failures':sum(r['failures'] for r in records),'errors':sum(r['errors'] for r in records),'groups':records,'actual_existing_bot':'NOT_RUN','live_entry_enabled':False}
+  (W/(label+'-suite.json')).write_text(json.dumps(summary,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+diff --git a/candidate3/test_gate_negatives.py b/candidate4/test_gate_negatives.py
+index 5f391e2..5ee38eb 100644
+--- a/candidate3/test_gate_negatives.py
++++ b/candidate4/test_gate_negatives.py
+@@ -12,6 +12,7 @@ W = Path(os.environ['FIXTURE_ROOT'])
+ 
+ def run(agent, g, fixtures):
+     outcomes = []
++    events_start = len(g.EVENTS)
+     captures = fixtures.CAPTURES
+     def turn(mode):
+         fixtures.MODE = mode
+@@ -122,7 +123,8 @@ def run(agent, g, fixtures):
+                     self.assertEqual(captures, [])
+                     self.assertNotIn('already reserved', g.EVENTS[-1]['reason'])
+         def test_environment_refresh_fake_key_refuses(self):
+-            g.arm('success', g.catalog('success')['proof'], agent)
++            # Unused 'refresh' authority: the refusal must come from the credential check, not from a spent ledger row.
++            gate = g.arm('refresh', g.catalog('refresh')['proof'], agent)
+             old = os.environ['GOOGLE_API_KEY']
+             os.environ['GOOGLE_API_KEY'] = 'SYNTHETIC-FREE-33fdf0'
+             try:
+@@ -130,6 +132,8 @@ def run(agent, g, fixtures):
+             finally:
+                 os.environ['GOOGLE_API_KEY'] = old
+             self.assertEqual(captures, [])
++            self.assertEqual(g.EVENTS[-1]['reason'], 'credential environment refresh mismatch')
++            self.assertFalse(gate._path.exists(), 'no reservation may be written for a refused request')
+         def test_unknown_errors_and_empty_tool_each_no_second_send(self):
+             for mode in ('timeout', '429', '500', 'empty', 'tool'):
+                 with self.subTest(mode=mode):
+@@ -176,7 +180,7 @@ def run(agent, g, fixtures):
+     stream = io.StringIO()
+     result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
+     record = {'tests':result.testsRun, 'failures':len(result.failures), 'errors':len(result.errors),
+-              'raw':stream.getvalue(), 'outcomes':outcomes, 'guard_events':g.EVENTS,
++              'raw':stream.getvalue(), 'outcomes':outcomes, 'guard_events':list(g.EVENTS[events_start:]),
+               'actual_run_conversation':bool(outcomes), 'actual_existing_bot':'NOT_RUN', 'vendor_charge':'NOT_RUN',
+               'additional_test_monkeypatches':['httpx.Client.send mutation wrapper per negative', 'GOOGLE_API_KEY synthetic replacement'],
+               'concurrency_scope':'real native dispatch helper + Gemini builder and HTTPX clients, not concurrent full conversation loops'}
+diff --git a/candidate3/test_lifecycle_paths.py b/candidate4/test_lifecycle_paths.py
+index c5eb181..80a6ddb 100644
+--- a/candidate3/test_lifecycle_paths.py
++++ b/candidate4/test_lifecycle_paths.py
+@@ -9,6 +9,7 @@ W = Path(os.environ['FIXTURE_ROOT'])
+ 
+ def run(agent, g, fake):
+     notes = []
++    events_start = len(g.EVENTS)
+     class Lifecycle(unittest.TestCase):
+         def setUp(self):
+             fake.CAPTURES.clear()
+@@ -48,14 +49,23 @@ def run(agent, g, fake):
+         def test_real_fallback_client_swap_cannot_send(self):
+             from agent.client_lifecycle import _swap_fallback_clients
+             from agent.gemini_native_adapter import GeminiNativeClient
++            # Unapproved key on the unused 'fallback' authority: the refusal must be the key/wire check, with no ledger row.
++            gate = g.arm('fallback', g.catalog('fallback')['proof'], agent)
++            _swap_fallback_clients(agent, GeminiNativeClient(api_key='SYNTHETIC-FREE-33fdf0'), 'gemini', 'gemini-3.8-flash',
++                                   'https://generativelanguage.googleapis.com/v1beta', 'chat_completions')
++            result = self.turn()
++            self.assertEqual(fake.CAPTURES, [])
++            self.assertEqual(g.EVENTS[-1]['reason'], 'unapproved method host path model key')
++            self.assertFalse(gate._path.exists())
++            notes.append({'case':'actual-fallback-primitive', 'key_is_approved_fake':False, 'response':result})
++            # Approved key on the spent 'success' authority proves only the ledger block, and is labelled as such.
+             g.arm('success', g.catalog('success')['proof'], agent)
+-            for key in (g.KEY, 'SYNTHETIC-FREE-33fdf0'):
+-                client = GeminiNativeClient(api_key=key)
+-                _swap_fallback_clients(agent, client, 'gemini', 'gemini-3.8-flash',
+-                                       'https://generativelanguage.googleapis.com/v1beta', 'chat_completions')
+-                result = self.turn()
+-                self.assertEqual(fake.CAPTURES, [])
+-                notes.append({'case':'actual-fallback-primitive', 'key_is_approved_fake':key == g.KEY, 'response':result})
++            _swap_fallback_clients(agent, GeminiNativeClient(api_key=g.KEY), 'gemini', 'gemini-3.8-flash',
++                                   'https://generativelanguage.googleapis.com/v1beta', 'chat_completions')
++            result = self.turn()
++            self.assertEqual(fake.CAPTURES, [])
++            self.assertIn('already reserved', g.EVENTS[-1]['reason'])
++            notes.append({'case':'actual-fallback-primitive', 'key_is_approved_fake':True, 'evidence':'ledger block only', 'response':result})
+             # Restore only the synthetic fixture, never a real route.
+             _swap_fallback_clients(agent, GeminiNativeClient(api_key=g.KEY), 'gemini', 'gemini-3.8-flash',
+                                    'https://generativelanguage.googleapis.com/v1beta', 'chat_completions')
+@@ -84,7 +94,7 @@ def run(agent, g, fake):
+              if os.environ['FIXTURE_LABEL'].startswith('runtime-final-') else unittest.defaultTestLoader.loadTestsFromTestCase(Lifecycle))
+     result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
+     record = {'tests':result.testsRun, 'failures':len(result.failures), 'errors':len(result.errors),
+-              'raw':output.getvalue(), 'outcomes':notes, 'guard_events':g.EVENTS,
++              'raw':output.getvalue(), 'outcomes':notes, 'guard_events':list(g.EVENTS[events_start:]),
+               'actual_run_conversation': True, 'actual_existing_bot':'NOT_RUN', 'vendor_charge':'NOT_RUN',
+               'limits':['fallback swap primitive exercised, not provider-selection automatic fallback chain',
+                         'real auxiliary call_llm task entry exercised, not full title background thread or context compression lifecycle']}
+diff --git a/candidate3/test_runtime_cases.py b/candidate4/test_runtime_cases.py
+index 5b8b22c..fd98b67 100644
+--- a/candidate3/test_runtime_cases.py
++++ b/candidate4/test_runtime_cases.py
+@@ -40,6 +40,7 @@ def run(agent, integration=None):
+     import io
+     import threading
+     fake = FakeTransport()
++    events_start = len(integration.EVENTS) if integration is not None else 0
+     original = httpx.HTTPTransport.handle_request
+     if integration is None:
+         httpx.HTTPTransport.handle_request = lambda self, request: fake.handle(self, request)
+@@ -89,7 +90,7 @@ def run(agent, integration=None):
+               'runtime_monkeypatches': ['httpx.HTTPTransport.handle_request final I/O => synthetic response', 'socket.gethostname => synthetic host'],
+               'actual_run_conversation': bool(outcomes), 'actual_existing_bot': 'NOT_RUN', 'vendor_charge': 'NOT_RUN'}
+     if integration is not None:
+-        record['guard_events'] = integration.EVENTS
++        record['guard_events'] = list(integration.EVENTS[events_start:])
+         record['runtime_monkeypatches'] += ['httpx.Client.__init__', 'httpx.HTTPTransport.__init__',
+                                            'httpx.Client.send', 'httpx.AsyncClient.send',
+                                            'global gated httpx.HTTPTransport.handle_request']
+diff --git a/candidate3/trusted_bootstrap.py b/candidate4/trusted_bootstrap.py
+index 817bffe..6e2386a 100644
+--- a/candidate3/trusted_bootstrap.py
++++ b/candidate4/trusted_bootstrap.py
+@@ -1,8 +1,10 @@
+ """Trusted preflight builds fixed content, never consumes outgoing observations."""
+ import os,json,hashlib,copy,stat
+ from pathlib import Path
+-from trusted_inputs import ROOTS,USER,SYSTEM,KEY,MODEL,URL,CASES,PREFIX
++from trusted_inputs import ROOTS,USER,SYSTEM,KEY,MODEL,URL,CASES,PREFIX,VALID_FROM,VALID_THROUGH,NAMESPACE_MAX_KRW
++from cap_policy import apply_cap,MAX_OUTPUT_TOKENS,CANDIDATE_COUNT
+ _BOUND=None
++def _issuance_reject(reason):raise RuntimeError('trusted issuance cap policy: '+reason)
+ 
+ def canonical(obj):return json.dumps(obj,sort_keys=True,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode()
+ def wire(r):return {'method':r.method,'url':str(r.url),'headers':sorted(r.headers.multi_items()),'body_hex':r.content.hex()}
+@@ -17,6 +19,7 @@ def bind(namespace,agent=None):
+  global _BOUND
+  if _BOUND is not None:raise RuntimeError('bootstrap already bound; no rebind')
+  if namespace not in ROOTS:raise RuntimeError('unissued namespace')
++ if agent is None:raise RuntimeError('trusted agent required')
+  root=ROOTS[namespace].resolve();home=root/'fixture-home/profiles/refomax';ledger=root/'ledger'
+  for key in ('TMPDIR','TEMP','TMP','FIXTURE_ROOT'):
+   if Path(os.environ[key]).resolve()!=root:raise RuntimeError('bootstrap root mismatch '+key)
+@@ -36,7 +39,7 @@ def bind(namespace,agent=None):
+   payload=build_gemini_request(messages=kw['messages'],tools=kw.get('tools'),tool_choice=kw.get('tool_choice'),temperature=kw.get('temperature'),max_tokens=kw.get('max_tokens'),top_p=kw.get('top_p'),stop=kw.get('stop'),thinking_config=extra.get('thinking_config') or extra.get('thinkingConfig'),response_format=kw.get('response_format') or extra.get('response_format'),model=MODEL,tools_as_json_schema=gemini_accepts_parameters_json_schema(agent.client.base_url))
+   request=agent.client._http.build_request('POST',URL,json=payload,headers=agent.client._headers())
+   raw=wire(request)
+-  capped=copy.deepcopy(payload);capped['generationConfig']['maxOutputTokens']=4096;capped['generationConfig']['candidateCount']=1
++  capped=apply_cap(copy.deepcopy(payload),_issuance_reject)
+   body=json.dumps(capped,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode()
+   request._content=body;request.stream=httpx.ByteStream(body);request.headers['content-length']=str(len(body))
+   packets[kind]={'raw_wire':raw,'final_wire':wire(request),'trusted_api_kwargs':kw}
+@@ -44,9 +47,9 @@ def bind(namespace,agent=None):
+  cases={}
+  for name in CASES:
+   pkt=packets['thinking' if name=='thinking' else 'plain'];aid=PREFIX+namespace+'_'+name
+-  proof={'synthetic':True,'authorization_id':aid,'namespace':namespace,'root':str(root),'profile_home':str(home),'ledger':str(ledger),'profile':'refomax','provider':'gemini','model':MODEL,'fakekey':KEY,'credential_id':'2108ae','credential_source':'GOOGLE_API_KEY','project':'SYNTHETIC-PAID-PROJECT-NOT-REAL','project_authority':'SYNTHETIC-ONLY','raw_wire_sha256':digest(pkt['raw_wire']),'wire_sha256':digest(pkt['final_wire']),'input_upper':16384,'output_plus_thinking_upper':4096,'candidates':1,'max_requests':1,'max_krw':56,'input_usd_million':'0.75','output_usd_million':'3.75','all_in_krw_per_usd':'2000','fx_tax_fees_rounding':'SYNTHETIC-ALL-IN-CEIL-NO-FIXED-FEES','vendor_semantics':'SYNTHETIC-COMBINED-OUTPUT-THINKING-ONE-CANDIDATE','token_proof':'SYNTHETIC-ASSUMED-UPPER-BOUND-NOT-VENDOR-TOKEN-PROOF','valid_from':'2026-11-01','valid_through':'2026-12-31','purpose':'main','trusted_input_sha256':digest({'user':USER,'system':SYSTEM})}
++  proof={'synthetic':True,'authorization_id':aid,'namespace':namespace,'root':str(root),'profile_home':str(home),'ledger':str(ledger),'profile':'refomax','provider':'gemini','model':MODEL,'fakekey':KEY,'credential_id':'2108ae','credential_source':'GOOGLE_API_KEY','project':'SYNTHETIC-PAID-PROJECT-NOT-REAL','project_authority':'SYNTHETIC-ONLY','raw_wire_sha256':digest(pkt['raw_wire']),'wire_sha256':digest(pkt['final_wire']),'input_upper':16384,'output_plus_thinking_upper':MAX_OUTPUT_TOKENS,'candidates':CANDIDATE_COUNT,'max_requests':1,'max_krw':56,'input_usd_million':'0.75','output_usd_million':'3.75','all_in_krw_per_usd':'2000','fx_tax_fees_rounding':'SYNTHETIC-ALL-IN-CEIL-NO-FIXED-FEES','vendor_semantics':'SYNTHETIC-COMBINED-OUTPUT-THINKING-ONE-CANDIDATE','token_proof':'SYNTHETIC-ASSUMED-UPPER-BOUND-NOT-VENDOR-TOKEN-PROOF','valid_from':VALID_FROM,'valid_through':VALID_THROUGH,'purpose':'main','trusted_input_sha256':digest({'user':USER,'system':SYSTEM})}
+   cases[name]={'authorization_id':aid,'raw_wire_sha256':proof['raw_wire_sha256'],'raw_wire':pkt['raw_wire'],'final_wire':pkt['final_wire'],'proof':proof}
+- cat={'schema':'trusted-synthetic-context-v3','namespace':namespace,'root':str(root),'profile_home':str(home),'ledger':str(ledger),'cases':cases,'live_entry_enabled':False}
++ cat={'schema':'trusted-synthetic-context-v4','namespace_max_krw':NAMESPACE_MAX_KRW,'namespace':namespace,'root':str(root),'profile_home':str(home),'ledger':str(ledger),'cases':cases,'live_entry_enabled':False}
+  raw=canonical(cat);path=root/'FROZEN-CATALOG.json';safe(path)
+  if path.exists():
+   if path.read_bytes()!=raw:raise RuntimeError('context catalog mismatch; no recapture/rewrite/refill')
+diff --git a/candidate3/trusted_inputs.py b/candidate4/trusted_inputs.py
+index 2b0c856..4940ecd 100644
+--- a/candidate3/trusted_inputs.py
++++ b/candidate4/trusted_inputs.py
+@@ -9,4 +9,7 @@ MODEL='gemini-3.8-flash'
+ URL='https://generativelanguage.googleapis.com/v1beta/models/'+MODEL+':generateContent'
+ CASES=('success','continuation','thinking','timeout','429','500','empty','tool','concurrent','processrace','callback','fallback','title','compression','refresh','expiry')
+ PREFIX='SYNTHETIC_ONLY_608159D2_'
++VALID_FROM='2026-11-01'
++VALID_THROUGH='2026-12-31'
++NAMESPACE_MAX_KRW=1000
+ LIVE_ENTRY_ENABLED=False
